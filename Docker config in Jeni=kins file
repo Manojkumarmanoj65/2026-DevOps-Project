@@ -1,0 +1,41 @@
+
+
+
+#!/bin/bash
+set -e
+
+echo "===== CHECK WAR FILE ====="
+ls -lh webapp/target/*.war
+
+echo "===== DOCKER LOGIN ====="
+echo "$DOCKER_PASS" | docker login \
+  -u "$DOCKER_USER" --password-stdin
+
+echo "===== BUILD DOCKER IMAGE ====="
+cd webapp
+
+docker build \
+  -t "$DOCKER_USER/projectdeployment:${BUILD_NUMBER}" \
+  -t "$DOCKER_USER/projectdeployment:latest" .
+
+echo "===== PUSH IMAGE TO DOCKER HUB ====="
+docker push "$DOCKER_USER/projectdeployment:${BUILD_NUMBER}"
+docker push "$DOCKER_USER/projectdeployment:latest"
+
+echo "===== REMOVE OLD CONTAINER ====="
+docker rm -f projectdeployment || true
+
+echo "===== DEPLOY NEW CONTAINER ====="
+docker run -d \
+  --name projectdeployment \
+  --restart unless-stopped \
+  -p 8090:8080 \
+  "$DOCKER_USER/projectdeployment:${BUILD_NUMBER}"
+
+echo "===== VERIFY CONTAINER ====="
+docker ps
+
+echo "===== DOCKER LOGOUT ====="
+docker logout
+
+echo "===== DEPLOYMENT COMPLETED ====="
