@@ -1,0 +1,452 @@
+# DevOps Project – Jenkins, Maven, Docker Hub & AWS EC2
+
+## 1. Project Overview
+
+இந்த project-ன் நோக்கம் GitHub-ல் உள்ள application-ஐ Jenkins மூலம் build செய்து, Docker image உருவாக்கி, Docker Hub-க்கு push செய்து, AWS EC2 instance-ல் deploy செய்வது.
+
+### Technology Stack
+
+- Source Code: GitHub
+- CI/CD: Jenkins Freestyle Project
+- Build Tool: Maven
+- Containerization: Docker
+- Image Registry: Docker Hub
+- Cloud Server: AWS EC2
+- Application Server: Apache Tomcat
+
+### Deployment Workflow
+
+GitHub → Jenkins → Maven Build → WAR File → Docker Image → Docker Hub → EC2 Deployment
+
+---
+
+## 2. Project Configuration Details
+
+| Configuration | Value |
+|---|---|
+| GitHub Repository | https://github.com/Manojkumarmanoj65/2026-DevOps-Project |
+| Git Branch | main |
+| Jenkins Job | Maven |
+| Maven Root POM | pom.xml |
+| Maven Goals | install (temporary workaround) |
+| Docker Hub Username | manoj65 |
+| Old Docker Repository | manoj65/webapp |
+| New Docker Repository | manoj65/projectdeployment |
+| Container Name | webapp |
+| Application Host Port | 8090 |
+| Tomcat Container Port | 8080 |
+
+Note: The previous successful Docker push was to `manoj65/webapp`. The new repository `manoj65/projectdeployment` must be created and its push verified separately.
+
+---
+
+## 3. GitHub Configuration
+
+GitHub repository:
+
+https://github.com/Manojkumarmanoj65/2026-DevOps-Project
+
+Jenkins configuration:
+
+1. Open Jenkins.
+2. Select the Freestyle project named `Maven`.
+3. Click Configure.
+4. Go to Source Code Management.
+5. Select Git.
+6. Enter the repository URL.
+7. Set Branch Specifier to:
+
+`*/main`
+
+---
+
+## 4. Maven Configuration
+
+In Jenkins:
+
+1. Open the Maven job.
+2. Click Configure.
+3. Go to Build.
+4. Select Invoke top-level Maven targets.
+5. Set Root POM:
+
+`pom.xml`
+
+6. Set Goals:
+
+`install`
+
+### Important
+
+Earlier, `clean install` produced a permission error while deleting:
+
+`webapp/target/webapp.war`
+
+For that reason, `install` was used as a temporary workaround.
+
+Once workspace permissions are corrected, try `clean install` again.
+
+---
+
+## 5. Jenkins Docker Credentials
+
+Go to:
+
+Manage Jenkins → Credentials → Global credentials → Add Credentials
+
+Configure:
+
+| Field | Value |
+|---|---|
+| Kind | Username with password |
+| Username | Docker Hub username |
+| Password | Docker Hub Personal Access Token |
+| ID | dockerhub-credentials |
+
+In the Freestyle job:
+
+1. Open Configure.
+2. Go to Build Environment.
+3. Enable Use secret text(s) or file(s).
+4. Add Username and password (separated).
+
+Set:
+
+| Field | Value |
+|---|---|
+| Username Variable | DOCKER_USER |
+| Password Variable | DOCKER_PASS |
+| Credentials | dockerhub-credentials |
+
+Do not put your Docker Hub password or token directly in the shell script.
+
+---
+
+## 6. Dockerfile
+
+The Dockerfile is located inside the `webapp` directory.
+
+Example:
+
+```dockerfile
+FROM tomcat:9.0-jdk17-temurin
+
+RUN rm -rf /usr/local/tomcat/webapps/*
+
+COPY target/*.war /usr/local/tomcat/webapps/ROOT.war
+```
+
+The Maven WAR output is expected at:
+
+`webapp/target/webapp.war`
+
+---
+
+## 7. Create a New Docker Hub Repository
+
+Open:
+
+https://hub.docker.com/
+
+Steps:
+
+1. Sign in to Docker Hub.
+2. Click Create Repository.
+3. Enter repository name:
+
+`projectdeployment`
+
+4. Choose Public or Private.
+5. Click Create.
+
+The new repository address will be:
+
+https://hub.docker.com/r/manoj65/projectdeployment
+
+Tags page:
+
+https://hub.docker.com/r/manoj65/projectdeployment/tags
+
+---
+
+## 8. Jenkins Execute Shell Script
+
+Add the following script in the Jenkins shell execution step after the Maven build.
+
+This assumes Jenkins and Docker are running on the same EC2 machine.
+
+```bash
+#!/bin/bash
+set -e
+
+IMAGE="manoj65/projectdeployment"
+TAG="27"
+
+echo "===== CHECK WAR FILE ====="
+ls -lh webapp/target/*.war
+
+echo "===== DOCKER LOGIN ====="
+echo "$DOCKER_PASS" | docker login \
+  -u "$DOCKER_USER" \
+  --password-stdin
+
+echo "===== BUILD DOCKER IMAGE ====="
+cd webapp
+
+docker build \
+  -t "$IMAGE:$TAG" \
+  -t "$IMAGE:latest" .
+
+echo "===== PUSH IMAGE TO DOCKER HUB ====="
+docker push "$IMAGE:$TAG"
+docker push "$IMAGE:latest"
+
+echo "===== REMOVE OLD CONTAINER ====="
+docker rm -f webapp || true
+
+echo "===== DEPLOY NEW CONTAINER ====="
+docker run -d \
+  --name webapp \
+  --restart unless-stopped \
+  -p 8090:8080 \
+  "$IMAGE:$TAG"
+
+echo "===== VERIFY CONTAINER ====="
+docker ps
+
+echo "===== DOCKER LOGOUT ====="
+docker logout
+
+echo "===== DEPLOYMENT COMPLETED ====="
+```
+
+Important:
+
+- The Dockerfile must be inside `webapp`.
+- The WAR file must exist before Docker build.
+- Configure the shell step to run only after a successful Maven build.
+- The script uses image tag `27`. Change it to `28`, `29`, etc. for future versioned releases.
+- The `latest` tag is updated whenever a new image is pushed with that tag.
+
+---
+
+## 9. Docker Hub Push
+
+The image names are:
+
+`manoj65/projectdeployment:27`
+
+`manoj65/projectdeployment:latest`
+
+Push commands:
+
+```bash
+docker push manoj65/projectdeployment:27
+
+docker push manoj65/projectdeployment:latest
+```
+
+After a successful push, verify the tags here:
+
+https://hub.docker.com/r/manoj65/projectdeployment/tags
+
+---
+
+## 10. EC2 Container Deployment
+
+The Docker port mapping is:
+
+```bash
+-p 8090:8080
+```
+
+Meaning:
+
+- EC2 host port: 8090
+- Tomcat container port: 8080
+
+Application URL:
+
+http://52.64.160.26:8090
+
+The EC2 Security Group must allow inbound TCP traffic on port 8090 from the intended client IP addresses.
+
+### Verify container
+
+```bash
+docker ps
+```
+
+### Check container logs
+
+```bash
+docker logs --tail 100 webapp
+```
+
+### Test application locally on EC2
+
+```bash
+curl -I http://localhost:8090/
+```
+
+A running container does not always mean that Tomcat has completed startup. Check the logs and HTTP response.
+
+---
+
+## 11. Maven Permission Troubleshooting
+
+Previously, Maven showed:
+
+```text
+Failed to delete webapp/target/webapp.war
+```
+
+Another error was:
+
+```text
+maven-surefire-plugin:2.11:test
+
+Error creating properties files for forking
+
+java.io.IOException: Permission denied
+```
+
+The WAR file was owned by `root`, which can cause permission problems for Jenkins.
+
+If you have SSH access to EC2, run:
+
+```bash
+sudo chown -R jenkins:jenkins \
+  /var/lib/jenkins/workspace/Maven
+
+sudo chmod -R u+rwX \
+  /var/lib/jenkins/workspace/Maven
+```
+
+Then change Maven Goals back to:
+
+`clean install`
+
+Save the job and run Build Now.
+
+If the error continues, inspect the workspace ownership and Maven Surefire temporary-file location.
+
+Do not change permissions outside the Jenkins workspace without checking ownership.
+
+---
+
+## 12. Useful Docker Commands
+
+Check running containers:
+
+```bash
+docker ps
+```
+
+Check all containers:
+
+```bash
+docker ps -a
+```
+
+View application logs:
+
+```bash
+docker logs webapp
+```
+
+Stop container:
+
+```bash
+docker stop webapp
+```
+
+Start container:
+
+```bash
+docker start webapp
+```
+
+Remove container:
+
+```bash
+docker rm -f webapp
+```
+
+List Docker images:
+
+```bash
+docker images
+```
+
+---
+
+## 13. Final Deployment Checklist
+
+- [ ] GitHub repository connected to Jenkins.
+- [ ] Git branch configured as main.
+- [ ] Maven Root POM configured as pom.xml.
+- [ ] Maven build successful.
+- [ ] WAR file generated.
+- [ ] Docker Hub credentials configured.
+- [ ] New Docker Hub repository created.
+- [ ] Docker image built successfully.
+- [ ] Docker image pushed to projectdeployment.
+- [ ] Image tags verified in Docker Hub.
+- [ ] EC2 container running.
+- [ ] Port mapping 8090:8080 verified.
+- [ ] EC2 Security Group allows port 8090.
+- [ ] Application URL tested successfully.
+
+---
+
+## 14. Final Architecture
+
+```text
+             GitHub
+                |
+                v
+             Jenkins
+                |
+                v
+           Maven Build
+                |
+                v
+            WAR File
+                |
+                v
+          Docker Build
+                |
+                v
+           Docker Hub
+                |
+                v
+    manoj65/projectdeployment
+                |
+                v
+            AWS EC2
+                |
+                v
+        Docker Container
+             webapp
+                |
+                v
+          Port 8090
+                |
+                v
+        Web Application
+```
+
+## 15. Project Summary
+
+The project automates application deployment using Jenkins and Docker.
+
+1. Developer pushes code to GitHub.
+2. Jenkins retrieves the source code.
+3. Maven builds the application and generates a WAR file.
+4. Docker builds an image using the WAR file.
+5. Jenkins pushes the image to Docker Hub.
+6. EC2 runs the Docker container.
+7. The application is accessed through port 8090.
+
+**Expected result:** An automated CI/CD pipeline that builds, packages, pushes, and deploys the web application.
