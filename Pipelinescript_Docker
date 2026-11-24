@@ -1,0 +1,186 @@
+
+pipeline {
+    agent any
+
+    triggers {
+        pollSCM('H/5 * * * *')
+    }
+
+    environment {
+        JAVA_HOME = '/usr/lib/jvm/java-21-amazon-corretto.x86_64'
+        PATH = "${JAVA_HOME}/bin:${env.PATH}"
+
+        DOCKER_CREDENTIALS_ID = '50ca8583-9fd3-435f-950a-147e793b7b57'
+        DOCKER_IMAGE = 'manoj65/projectdeployment'
+        CONTAINER_NAME = 'projectdeployment'
+
+        GIT_REPO = 'https://github.com/Manojkumarmanoj65/2026-DevOps-Project'
+        GIT_BRANCH = 'main'
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                git branch: "${GIT_BRANCH}",
+                    url: "${GIT_REPO}"
+            }
+        }
+
+        stage('Check Java, Maven and Docker') {
+            steps {
+                sh '''
+                    echo "Checking Java..."
+                    java -version
+
+                    echo "Checking Maven..."
+                    mvn -version
+
+                    echo "Checking Docker..."
+                    docker --version
+                '''
+            }
+        }
+
+        stage('Build Maven WAR') {
+            steps {
+                sh '''
+                    echo "Building Maven project..."
+                    mvn clean package -DskipTests=false
+                '''
+            }
+        }
+
+        stage('Verify WAR and Dockerfile') {
+            steps {
+                sh '''
+                    echo "Checking WAR file..."
+                    test -s webapp/target/webapp.war
+
+                    echo "Checking root Dockerfile..."
+                    test -s Dockerfile
+
+                    echo "Files verified successfully."
+                    ls -lh webapp/target/webapp.war
+                    ls -lh Dockerfile
+                '''
+            }
+        }
+
+        stage('Check Docker Hub Connection') {
+            steps {
+                sh '''
+                    docker info
+                '''
+            }
+        }
+
+        stage('Docker Login, Build and Push') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        echo "Building Docker image..."
+
+                        docker build \
+                            -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                            -t ${DOCKER_IMAGE}:latest \
+                            -f Dockerfile .
+
+                        echo "Pushing versioned image..."
+                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+
+                        echo "Pushing latest image..."
+                        docker push ${DOCKER_IMAGE}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Remove Old Container') {
+            steps {
+                sh '''
+                    echo "Removing old container if it exists..."
+                    docker rm -f ${CONTAINER_NAME} || true
+                '''
+            }
+        }
+
+        stage('Deploy Application') {
+            steps {
+                sh '''
+                    echo "Deploying application..."
+
+                    docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p 8090:8080 \
+                        ${DOCKER_IMAGE}:latest
+
+                    echo "Container deployed."
+                    docker ps
+                '''
+            }
+        }
+
+        stage('Application Health Check') {
+            steps {
+                sh '''
+                    echo "Checking application health..."
+
+                    for i in $(seq 1 12); do
+                        if curl -fsS http://localhost:8090/ > /dev/null; then
+                            echo "Application is responding successfully."
+                            exit 0
+                        fi
+
+                        echo "Waiting for application to start..."
+                        sleep 10
+                    done
+
+                    echo "Application health check failed."
+                    docker logs ${CONTAINER_NAME}
+                    exit 1
+                '''
+            }
+        }
+
+        stage('Docker Cleanup') {
+            steps {
+                sh '''
+                    echo "Removing dangling Docker images..."
+                    docker image prune -f
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+            echo 'Application deployed on port 8090.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Please check the console output.'
+        }
+
+        always {
+            echo 'Jenkins pipeline execution finished.'
+        }
+    }
+}
