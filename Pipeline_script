@@ -1,92 +1,495 @@
-
 pipeline {
+
     agent any
 
-    environment {
-        DOCKER_IMAGE = 'manoj65/projectdeployment'
-        DOCKER_TAG = "${BUILD_NUMBER}"
-        CONTAINER_NAME = 'webapp'
+    tools {
+        maven 'Maven3'
+        jdk 'JDK17'
     }
+
+    environment {
+
+        // ============================
+        // Docker Hub Configuration
+        // ============================
+
+        DOCKERHUB_CREDS = 'dockerhub-creds'
+
+        // CHANGE THIS
+        DOCKER_REPO = 'YOUR_DOCKERHUB_USERNAME/webapp'
+
+
+        // ============================
+        // AWS EKS Configuration
+        // ============================
+
+        // CHANGE IF REQUIRED
+        AWS_REGION = 'us-east-1'
+
+        // CHANGE TO YOUR EKS CLUSTER
+        EKS_CLUSTER = 'webapp-eks'
+
+
+        // ============================
+        // Kubernetes Configuration
+        // ============================
+
+        K8S_NAMESPACE = 'default'
+
+        DEPLOYMENT_NAME = 'webapp'
+
+        CONTAINER_NAME = 'webapp'
+
+        SERVICE_NAME = 'webapp-service'
+    }
+
+
+    options {
+
+        timestamps()
+
+        disableConcurrentBuilds()
+
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '10'
+            )
+        )
+    }
+
+
+    /********************************************
+     * GitHub Webhook Trigger
+     ********************************************/
+
+    triggers {
+
+        githubPush()
+
+    }
+
 
     stages {
 
+
+        /********************************************
+         * Stage 1 - Checkout
+         ********************************************/
+
         stage('Checkout') {
+
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/Manojkumarmanoj65/2026-DevOps-Project'
+
+                echo 'Checking out source code...'
+
+                checkout scm
+
             }
+
         }
 
-        stage('Maven Build') {
+
+        /********************************************
+         * Stage 2 - Maven Build
+         ********************************************/
+
+        stage('Maven Build & Test') {
+
             steps {
-                sh 'mvn -B install'
+
+                echo 'Building WAR using Maven...'
+
+                sh '''
+
+                    mvn -B clean package
+
+                '''
+
             }
+
+            post {
+
+                always {
+
+                    junit(
+                        allowEmptyResults: true,
+                        testResults:
+                        'target/surefire-reports/*.xml'
+                    )
+
+                }
+
+            }
+
         }
 
-        stage('Check WAR File') {
+
+        /********************************************
+         * Stage 3 - Verify WAR
+         ********************************************/
+
+        stage('Verify WAR') {
+
             steps {
-                sh 'ls -lh webapp/target/*.war'
+
+                echo 'Checking generated WAR file...'
+
+                sh '''
+
+                    ls -lh target/
+
+                    test -f target/webapp.war
+
+                '''
+
             }
+
         }
+
+
+        /********************************************
+         * Stage 4 - Archive WAR
+         ********************************************/
+
+        stage('Archive WAR') {
+
+            steps {
+
+                archiveArtifacts(
+                    artifacts: 'target/*.war',
+                    fingerprint: true
+                )
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 5 - Docker Build
+         ********************************************/
 
         stage('Docker Build') {
+
             steps {
-                dir('webapp') {
-                    sh '''
-                        docker build \
-                          -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
-                          -t ${DOCKER_IMAGE}:latest .
-                    '''
-                }
-            }
-        }
 
-        stage('Docker Hub Push') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )
-                ]) {
-                    sh '''
-                        echo "$DOCKER_PASS" | docker login \
-                          -u "$DOCKER_USER" \
-                          --password-stdin
+                echo "Building Docker image: ${DOCKER_REPO}:${BUILD_NUMBER}"
 
-                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
-                        docker push ${DOCKER_IMAGE}:latest
-
-                        docker logout
-                    '''
-                }
-            }
-        }
-
-        stage('Deploy to EC2') {
-            steps {
                 sh '''
-                    docker rm -f ${CONTAINER_NAME} || true
 
-                    docker run -d \
-                      --name ${CONTAINER_NAME} \
-                      --restart unless-stopped \
-                      -p 8090:8080 \
-                      ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    docker build \
+                    -t ${DOCKER_REPO}:${BUILD_NUMBER} \
+                    -t ${DOCKER_REPO}:latest \
+                    .
 
-                    docker ps
                 '''
+
             }
+
         }
+
+
+        /********************************************
+         * Stage 6 - Docker Hub Login
+         ********************************************/
+
+        stage('Docker Hub Login') {
+
+            steps {
+
+                withCredentials([
+
+                    usernamePassword(
+
+                        credentialsId:
+                        "${DOCKERHUB_CREDS}",
+
+                        usernameVariable:
+                        'DOCKER_USERNAME',
+
+                        passwordVariable:
+                        'DOCKER_PASSWORD'
+
+                    )
+
+                ]) {
+
+                    sh '''
+
+                        echo "$DOCKER_PASSWORD" | \
+                        docker login \
+                        -u "$DOCKER_USERNAME" \
+                        --password-stdin
+
+                    '''
+
+                }
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 7 - Push Docker Image
+         ********************************************/
+
+        stage('Push Docker Image') {
+
+            steps {
+
+                echo "Pushing Docker image ${DOCKER_REPO}:${BUILD_NUMBER}"
+
+                sh '''
+
+                    docker push ${DOCKER_REPO}:${BUILD_NUMBER}
+
+                    docker push ${DOCKER_REPO}:latest
+
+                '''
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 8 - Connect Jenkins to EKS
+         ********************************************/
+
+        stage('Connect to EKS') {
+
+            steps {
+
+                echo "Connecting to EKS cluster: ${EKS_CLUSTER}"
+
+                sh '''
+
+                    echo "AWS identity:"
+
+                    aws sts get-caller-identity
+
+
+                    echo "Updating kubeconfig..."
+
+                    aws eks update-kubeconfig \
+                    --region ${AWS_REGION} \
+                    --name ${EKS_CLUSTER}
+
+
+                    echo "Checking Kubernetes nodes..."
+
+                    kubectl get nodes
+
+                '''
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 9 - Apply Kubernetes Manifests
+         ********************************************/
+
+        stage('Apply Kubernetes Configuration') {
+
+            steps {
+
+                echo 'Applying Kubernetes manifests...'
+
+                sh '''
+
+                    kubectl apply \
+                    -f kubernetes/deployment.yaml \
+                    -n ${K8S_NAMESPACE}
+
+
+                    kubectl apply \
+                    -f kubernetes/service.yaml \
+                    -n ${K8S_NAMESPACE}
+
+                '''
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 10 - Deploy New Docker Image
+         ********************************************/
+
+        stage('Deploy to EKS') {
+
+            steps {
+
+                echo "Deploying Docker image ${DOCKER_REPO}:${BUILD_NUMBER}"
+
+                sh '''
+
+                    kubectl set image \
+                    deployment/${DEPLOYMENT_NAME} \
+                    ${CONTAINER_NAME}=${DOCKER_REPO}:${BUILD_NUMBER} \
+                    -n ${K8S_NAMESPACE}
+
+                '''
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 11 - Wait for Kubernetes Rollout
+         ********************************************/
+
+        stage('Verify Kubernetes Rollout') {
+
+            steps {
+
+                echo 'Waiting for Kubernetes rollout...'
+
+                sh '''
+
+                    kubectl rollout status \
+                    deployment/${DEPLOYMENT_NAME} \
+                    -n ${K8S_NAMESPACE} \
+                    --timeout=180s
+
+                '''
+
+            }
+
+        }
+
+
+        /********************************************
+         * Stage 12 - Kubernetes Validation
+         ********************************************/
+
+        stage('Validate Deployment') {
+
+            steps {
+
+                echo 'Checking Kubernetes resources...'
+
+                sh '''
+
+                    echo "============================"
+                    echo "DEPLOYMENT"
+                    echo "============================"
+
+                    kubectl get deployment \
+                    ${DEPLOYMENT_NAME} \
+                    -n ${K8S_NAMESPACE}
+
+
+                    echo "============================"
+                    echo "PODS"
+                    echo "============================"
+
+                    kubectl get pods \
+                    -n ${K8S_NAMESPACE} \
+                    -l app=webapp \
+                    -o wide
+
+
+                    echo "============================"
+                    echo "SERVICE"
+                    echo "============================"
+
+                    kubectl get service \
+                    ${SERVICE_NAME} \
+                    -n ${K8S_NAMESPACE}
+
+
+                    echo "============================"
+                    echo "DEPLOYED IMAGE"
+                    echo "============================"
+
+                    kubectl get deployment \
+                    ${DEPLOYMENT_NAME} \
+                    -n ${K8S_NAMESPACE} \
+                    -o=jsonpath='{.spec.template.spec.containers[0].image}'
+
+                    echo ""
+
+                '''
+
+            }
+
+        }
+
     }
+
+
+    /********************************************
+     * POST ACTIONS
+     ********************************************/
 
     post {
+
+
         success {
-            echo 'Deployment completed successfully!'
+
+            echo """
+            ==============================================
+            CI/CD PIPELINE SUCCESSFUL
+            ==============================================
+
+            Jenkins Build:
+            ${BUILD_NUMBER}
+
+            Docker Image:
+            ${DOCKER_REPO}:${BUILD_NUMBER}
+
+            EKS Cluster:
+            ${EKS_CLUSTER}
+
+            Kubernetes Deployment:
+            ${DEPLOYMENT_NAME}
+
+            ==============================================
+            """
+
         }
+
+
         failure {
-            echo 'Pipeline failed. Check Console Output.'
+
+            echo '''
+            ==============================================
+            PIPELINE FAILED
+            ==============================================
+
+            Check Jenkins console output.
+
+            Useful Kubernetes troubleshooting commands:
+
+            kubectl get pods
+            kubectl get deployments
+            kubectl get svc
+            kubectl get events --sort-by=.metadata.creationTimestamp
+
+            ==============================================
+            '''
+
         }
+
+
+        always {
+
+            echo 'Logging out from Docker Hub...'
+
+            sh '''
+
+                docker logout || true
+
+            '''
+
+        }
+
     }
+
 }
